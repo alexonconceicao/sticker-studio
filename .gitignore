@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+build-cache/
+dist/
+ffmpeg-bin/
+*.AppImage
+*.spec.bak
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

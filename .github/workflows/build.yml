@@ -1,0 +1,70 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dependências do sistema
+        run: sudo apt-get update && sudo apt-get install -y libfuse2 libegl1 libxkbcommon-x11-0 libxcb-cursor0 fonts-dejavu-core
+      - name: Dependências Python
+        run: pip install -r requirements.txt pyinstaller
+      - name: AppImage
+        run: ./packaging/build_linux.sh
+      - name: Teste do pacote
+        run: QT_QPA_PLATFORM=offscreen ./dist/StickerStudio-x86_64.AppImage --appimage-extract-and-run --selftest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/StickerStudio-x86_64.AppImage
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dependências Python
+        run: pip install -r requirements.txt pyinstaller
+      - name: Executável
+        shell: pwsh
+        run: ./packaging/build_windows.ps1
+      - name: Teste do pacote
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $p = Start-Process dist\StickerStudio\StickerStudio.exe -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/StickerStudio.exe
+            dist/StickerStudio-windows-x64.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/linux/StickerStudio-x86_64.AppImage
+            artifacts/windows/StickerStudio.exe
+            artifacts/windows/StickerStudio-windows-x64.zip

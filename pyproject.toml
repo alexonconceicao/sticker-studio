@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sticker-studio"
+dynamic = ["version"]
+description = "Figurinhas animadas para WhatsApp e Telegram a partir de vídeos"
+readme = "README.md"
+license = { text = "Unlicense" }
+requires-python = ">=3.10"
+dependencies = [
+  "PySide6>=6.6",
+  "Pillow>=10.0",
+  "numpy>=1.26",
+  "onnxruntime>=1.18; sys_platform != 'win32'",
+  "onnxruntime-directml>=1.18; sys_platform == 'win32'",
+]
+
+[project.scripts]
+sticker-studio = "sticker_studio.gui.app:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "sticker_studio.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["sticker_studio*"]
+
+[tool.setuptools.package-data]
+sticker_studio = ["icon.svg"]
