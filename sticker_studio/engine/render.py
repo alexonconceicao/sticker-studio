@@ -152,13 +152,13 @@ def render(p: RenderParams, work_root: Path, progress=lambda msg, frac: None, ca
         while out.exists():
             out = p.out_dir / f"sticker-{stamp}-{n}.{target['ext']}"
             n += 1
-        encode = encode_webp if p.target == "whatsapp" else encode_webm
-        best = encode(seq, fps, work, target, progress, check)
+        best = encode_with_fallback(seq, fps, work, target, progress, check, target["ext"])
         shutil.move(best["path"], out)
         w, h = (SIZE, SIZE) if p.target == "whatsapp" else (fw, fh)
         progress("pronto", 1.0)
+        dur = best.get("duration") or len(order) / fps
         return RenderResult(out, out.stat().st_size, w, h, best["fps"], len(order),
-                            round(len(order) / fps, 2), best["label"], best.get("warning"))
+                            round(dur, 2), best["label"], best.get("warning"))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -203,8 +203,10 @@ def apply_overlay(files, png: bytes, out: Path, progress):
 # ---------------------------------------------------------------- codificação
 
 
-def fps_ladder(fps):
-    return [fps] + [f for f in (24, 20, 15, 12, 10) if f < fps]
+def ladder(fps):
+    """Degraus de fallback: (fps, denoise). Ruído de câmera (pouca luz) gasta muitos bytes."""
+    steps = [(fps, False), (fps, True)]
+    return steps + [(f, True) for f in (24, 20, 15, 12, 10, 8) if f < fps]
 
 
 def search_encode(levels, encode_one, max_bytes, progress, label, check):
@@ -240,60 +242,86 @@ def search_encode(levels, encode_one, max_bytes, progress, label, check):
     return best, res[best]
 
 
-def encode_webp(seq, fps, work, target, progress, check):
-    pad = f"pad={SIZE}:{SIZE}:(ow-iw)/2:(oh-ih)/2:color=black@0"
-    ladder = fps_ladder(fps)
-    for k, f_out in enumerate(ladder):
-        vf = (f"fps={f_out}," if f_out != fps else "") + f"{pad},format=rgba"
+DENOISE = "hqdn3d=3:2:6:6"
 
-        def one(q, vf=vf, f_out=f_out):
-            out = work / f"try-{f_out}-{q}.webp"
-            ffmpeg.run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-framerate", str(fps),
-                "-i", str(seq / "%05d.png"), "-vf", vf, "-c:v", "libwebp_anim", "-lossless", "0",
-                "-q:v", str(q), "-compression_level", "5", "-loop", "0", "-an",
-                "-map_metadata", "-1", "-y", str(out),
-            ])
-            return out
 
-        # abaixo de q40 o webp fica borrado: prefere baixar fps antes, exceto no último degrau
-        last = k == len(ladder) - 1
-        r = search_encode(list(range(100, 4 if last else 39, -1)), one, target["max_bytes"], progress,
-                          f"webp {f_out} fps", check)
+def encode_with_fallback(seq, fps, work, target, progress, check, kind):
+    """Sempre entrega um arquivo dentro do limite.
+
+    1. melhor qualidade que cabe sem passar da qualidade mínima aceitável, ligando redução
+       de ruído e descendo o fps; 2. se nada couber, encurta a duração (10 fps, qualidade
+       mínima aceitável) até caber. Cada degrau testa primeiro o nível mínimo: se nem ele
+       cabe, pula sem gastar a busca inteira.
+    """
+    webp = kind == "webp"
+
+    def one(level, f_out, dn, dur=None):
+        out = work / f"try-{f_out}-{int(dn)}-{level}-{dur or 0}.{kind}"
+        vf = ([f"fps={f_out}"] if f_out != fps else []) + ([DENOISE] if dn else [])
+        limit = ["-t", f"{dur:.2f}"] if dur else []
+        if webp:
+            vf += [f"pad={SIZE}:{SIZE}:(ow-iw)/2:(oh-ih)/2:color=black@0", "format=rgba"]
+            codec = ["-c:v", "libwebp_anim", "-lossless", "0", "-q:v", str(level), "-compression_level", "5",
+                     "-loop", "0"]
+        else:
+            vf.append("format=yuva420p")
+            codec = ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", str(level), "-b:v", "0",
+                     "-deadline", "good", "-cpu-used", "2", "-row-mt", "1", "-threads", "2", "-g", "300",
+                     "-fflags", "+bitexact", "-flags:v", "+bitexact", "-metadata:s:v:0", "encoder="]
+        ffmpeg.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-framerate", str(fps),
+                    "-i", str(seq / "%05d.png"), *limit, "-vf", ",".join(vf), *codec,
+                    "-an", "-map_metadata", "-1", "-y", str(out)])
+        return out
+
+    # q maior = melhor (abaixo de ~35 fica borrado); crf menor = melhor (acima de ~48 fica borrado)
+    levels = list(range(100, 34, -1)) if webp else list(range(8, 49))
+
+    def label(level, f_out, dn):
+        return (f"webp q{level}" if webp else f"vp9 crf{level}") + f" · {f_out} fps" + (" · sem ruído" if dn else "")
+
+    steps = ladder(fps)
+    for f_out, dn in steps:
+        check()
+        progress(f"testando {f_out} fps" + (" sem ruído" if dn else ""), 0.76)
+        if one(levels[-1], f_out, dn).stat().st_size > target["max_bytes"]:
+            continue
+        r = search_encode(levels, lambda lv: one(lv, f_out, dn), target["max_bytes"], progress,
+                          f"{kind} {f_out} fps" + (" sem ruído" if dn else ""), check)
         if r:
-            q, path = r
-            best = {"path": path, "fps": f_out, "label": f"webp q{q}"}
-            if k:
-                best["warning"] = f"fps reduzido para {f_out} para caber em {target['label']}"
-            return best
-    raise ValueError(f"não coube em {target['label']} nem na qualidade mínima; encurte o trecho")
+            lv, path = r
+            warn = None
+            if f_out != fps:
+                warn = f"fps reduzido para {f_out} para caber em {target['label']}"
+            elif dn:
+                warn = "ruído do vídeo reduzido para caber no limite"
+            return {"path": path, "fps": f_out, "label": label(lv, f_out, dn), "warning": warn}
 
+    # antes de cortar a duração: 10 fps aceitando qualidade mais baixa
+    f_out, dn = min(fps, 10), True
+    low = list(range(levels[-1] - 1, 14, -1)) if webp else list(range(levels[-1] + 1, 58))
+    if one(low[-1], f_out, dn).stat().st_size <= target["max_bytes"]:
+        lv, path = search_encode(low, lambda lv: one(lv, f_out, dn), target["max_bytes"], progress,
+                                 f"{kind} {f_out} fps sem ruído", check)
+        return {"path": path, "fps": f_out, "label": label(lv, f_out, dn),
+                "warning": f"fps e qualidade reduzidos para caber em {target['label']}; "
+                           "um trecho mais curto fica mais nítido"}
 
-def encode_webm(seq, fps, work, target, progress, check):
-    ladder = fps_ladder(fps)
-    for k, f_out in enumerate(ladder):
-        vf = (f"fps={f_out}," if f_out != fps else "") + "format=yuva420p"
-
-        def one(crf, vf=vf, f_out=f_out):
-            out = work / f"try-{f_out}-{crf}.webm"
-            ffmpeg.run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-framerate", str(fps),
-                "-i", str(seq / "%05d.png"), "-vf", vf,
-                "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", str(crf), "-b:v", "0",
-                "-deadline", "good", "-cpu-used", "1", "-row-mt", "1", "-threads", "2", "-g", "300",
-                "-an", "-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact",
-                "-metadata:s:v:0", "encoder=", "-y", str(out),
-            ])
-            return out
-
-        last = k == len(ladder) - 1
-        # crf menor = melhor qualidade
-        r = search_encode(list(range(8, 64 if last else 46)), one, target["max_bytes"], progress,
-                          f"vp9 {f_out} fps", check)
-        if r:
-            crf, path = r
-            best = {"path": path, "fps": f_out, "label": f"vp9 crf{crf}"}
-            if k:
-                best["warning"] = f"fps reduzido para {f_out} para caber em {target['label']}"
-            return best
-    raise ValueError(f"não coube em {target['label']} nem na qualidade mínima; encurte o trecho")
+    # último recurso: encurta mantendo 10 fps e a qualidade mínima aceitável
+    f_out, dn = min(fps, 10), True
+    lv = levels[-1]
+    n = len(list(seq.glob("*.png")))
+    lo, hi, best = 0.5, n / fps, None
+    while hi - lo > 0.2:
+        check()
+        mid = (lo + hi) / 2
+        progress(f"encurtando pra caber ({mid:.1f}s)", 0.95)
+        path = one(lv, f_out, dn, mid)
+        if path.stat().st_size <= target["max_bytes"]:
+            best, lo = (path, mid), mid
+        else:
+            hi = mid
+    if not best:
+        path = one(5 if webp else 63, f_out, dn, 0.5)
+        best = (path, 0.5)
+    return {"path": best[0], "fps": f_out, "label": label(lv, f_out, dn), "duration": best[1],
+            "warning": f"trecho encurtado para {best[1]:.1f}s para caber em {target['label']}"}

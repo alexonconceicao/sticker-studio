@@ -1,6 +1,9 @@
 """Gera build/icon.png e build/icon.ico a partir do icon.svg."""
+import os
 import sys
 from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QImage, QPainter
