@@ -22,6 +22,7 @@ class Viewer(QWidget):
     cropChanged = Signal()
     textSelected = Signal(object)
     textsChanged = Signal()
+    resized = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -129,6 +130,10 @@ class Viewer(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(br)
         p.restore()
+
+    def resizeEvent(self, e):  # noqa: N802
+        super().resizeEvent(e)
+        self.resized.emit()
 
     # ---------------------------------------------------------------- mouse
     def _hit_text(self, pos: QPointF):

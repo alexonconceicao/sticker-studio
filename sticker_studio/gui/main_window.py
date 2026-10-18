@@ -313,6 +313,7 @@ class MainWindow(QMainWindow):
         self.btn_in.clicked.connect(self.set_in)
         self.btn_out.clicked.connect(self.set_out)
         self.player.frameReady.connect(self.viewer.set_image)
+        self.viewer.resized.connect(self.on_viewer_resized)
         self.player.timeChanged.connect(self.on_time)
         self.player.playingChanged.connect(lambda p: self.btn_play.setText("⏸" if p else "▶"))
         self.timeline.max_span = self.max_span
@@ -348,6 +349,11 @@ class MainWindow(QMainWindow):
                         ("Left", lambda: self.player.step(-1)), ("Right", lambda: self.player.step(1)),
                         ("Ctrl+O", self.choose_file)):
             QShortcut(QKeySequence(key), self, fn)
+
+    def on_viewer_resized(self):
+        r = self.viewer.disp_rect()
+        side = max(r.width(), r.height()) * self.viewer.devicePixelRatioF()
+        self.player.display_side = side or 1280
 
     def set_editor_enabled(self, on):
         for w in (self.btn_play, self.btn_in, self.btn_out, self.btn_go, self.btn_add_text):
@@ -402,6 +408,7 @@ class MainWindow(QMainWindow):
             self.chk_boom.setChecked(False)
             self.chk_bg.setChecked(False)
         self.viewer.set_source(info.width, info.height, info.alpha or info.sticker)
+        self.on_viewer_resized()
         self.viewer.square = self.shape == "square"
         self.reset_crop()
         self.player.set_media(info)

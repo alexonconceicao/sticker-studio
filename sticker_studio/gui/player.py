@@ -7,12 +7,13 @@ from PySide6.QtGui import QImage
 from sticker_studio.engine import media
 
 MAX_CACHE_FRAMES = 600
-PREVIEW_SIDE = 480
-SCRUB_SIDE = 720
+CACHE_BUDGET = 700 * 1024 * 1024  # bytes de frames decodificados na memória
+MAX_SIDE = 1920
 
 
-def to_qimage(buf, w, h) -> QImage:
-    return QImage(buf, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+def to_qimage(buf, w, h, bpp=4) -> QImage:
+    fmt = QImage.Format.Format_RGBA8888 if bpp == 4 else QImage.Format.Format_RGB888
+    return QImage(buf, w, h, w * bpp, fmt).copy()
 
 
 class Player(QObject):
@@ -38,6 +39,7 @@ class Player(QObject):
         self._scrub_gen = 0
         self._idx = 0
         self._dir = 1
+        self.display_side = 1280  # lado maior da área de exibição em pixels físicos
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._tick)
@@ -112,7 +114,7 @@ class Player(QObject):
         gen, info, pos = self._scrub_gen, self.info, self.pos
 
         def work():
-            r = media.frame_at(info, pos, SCRUB_SIDE)
+            r = media.frame_at(info, pos, self.scrub_side())
             if r and gen == self._scrub_gen:
                 self._scrubFrame.emit(gen, to_qimage(*r))
 
@@ -142,6 +144,20 @@ class Player(QObject):
         else:
             self._idx = self._idx + 1 if self._idx < last else 0
 
+    def scrub_side(self):
+        return int(min(MAX_SIDE, max(480, self.display_side)))
+
+    def segment_side(self, start, end):
+        """Maior resolução que cabe no orçamento de memória pro trecho inteiro."""
+        side = self.scrub_side()
+        if not self.info:
+            return side
+        n = max(1, min(MAX_CACHE_FRAMES, int((end - start) * self.fps) + 1))
+        bpp = 4 if self.info.alpha else 3
+        ar = min(self.info.width, self.info.height) / max(self.info.width, self.info.height)
+        max_px = CACHE_BUDGET / (n * bpp)
+        return int(max(320, min(side, (max_px / ar) ** 0.5)))
+
     def _load_segment(self):
         if not self.info:
             return
@@ -151,12 +167,13 @@ class Player(QObject):
         self.cache, self.cache_key, self.cache_complete = [], (start, end), False
         self._idx = 0
         fps = self.fps
+        side = self.segment_side(start, end)
 
         def work():
-            for i, (buf, w, h) in enumerate(media.iter_segment(info, start, end, fps, PREVIEW_SIDE)):
+            for i, (buf, w, h, bpp) in enumerate(media.iter_segment(info, start, end, fps, side)):
                 if gen != self._gen or i >= MAX_CACHE_FRAMES:
                     break
-                self._segFrame.emit(gen, i, to_qimage(buf, w, h))
+                self._segFrame.emit(gen, i, to_qimage(buf, w, h, bpp))
             if gen == self._gen:
                 self._segDone.emit(gen)
 

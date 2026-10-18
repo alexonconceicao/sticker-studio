@@ -113,38 +113,53 @@ def preview_size(info: MediaInfo, max_side: int):
     return max(2, int(info.width * s) // 2 * 2), max(2, int(info.height * s) // 2 * 2)
 
 
+TONEMAP = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+           "tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv")
+
+
+def _preview_filters(info: MediaInfo, w: int, h: int, pix: str, fps: float | None = None) -> str:
+    vf = [f"fps={fps}"] if fps else []
+    vf.append(f"scale={w}:{h}:flags=bicubic")
+    if info.hdr and ffmpeg.has_filter("zscale"):
+        vf.append(TONEMAP)  # depois de reduzir: muito mais leve que em 4K
+    vf.append(f"format={pix}")
+    return ",".join(vf)
+
+
 def frame_at(info: MediaInfo, t: float, max_side=720):
-    """Um frame RGBA no tempo t. Retorna (bytes, w, h) ou None."""
+    """Um frame no tempo t. Retorna (bytes, w, h, bytes_por_pixel) ou None."""
     w, h = preview_size(info, max_side)
+    bpp = 4 if info.alpha else 3
     t = max(0.0, min(t, max(0.0, info.duration - 0.02)))
     try:
         r = ffmpeg.run([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{t:.3f}", *info.decoder_args(),
-            "-i", str(info.path), "-frames:v", "1", "-an", "-vf", f"scale={w}:{h}:flags=bilinear,format=rgba",
-            "-f", "rawvideo", "-",
-        ], timeout=20)
+            "-i", str(info.path), "-frames:v", "1", "-an",
+            "-vf", _preview_filters(info, w, h, "rgba" if bpp == 4 else "rgb24"), "-f", "rawvideo", "-",
+        ], timeout=30)
     except (ffmpeg.FFmpegError, subprocess.TimeoutExpired):
         return None
-    if len(r.stdout) < w * h * 4:
+    if len(r.stdout) < w * h * bpp:
         return None
-    return r.stdout[: w * h * 4], w, h
+    return r.stdout[: w * h * bpp], w, h, bpp
 
 
 def iter_segment(info: MediaInfo, start: float, end: float, fps: float, max_side=480):
-    """Gera frames RGBA (bytes, w, h) do trecho, na taxa fps. Pra prévia em tempo real."""
+    """Gera frames (bytes, w, h, bytes_por_pixel) do trecho, na taxa fps. Pra prévia em tempo real."""
     w, h = preview_size(info, max_side)
-    size = w * h * 4
+    bpp = 4 if info.alpha else 3
+    size = w * h * bpp
     proc = ffmpeg.popen([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}", "-t", f"{max(0.05, end - start):.3f}",
         *info.decoder_args(), "-i", str(info.path), "-an",
-        "-vf", f"fps={fps},scale={w}:{h}:flags=bilinear,format=rgba", "-f", "rawvideo", "-",
+        "-vf", _preview_filters(info, w, h, "rgba" if bpp == 4 else "rgb24", fps), "-f", "rawvideo", "-",
     ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         while True:
             buf = proc.stdout.read(size)
             if not buf or len(buf) < size:
                 break
-            yield buf, w, h
+            yield buf, w, h, bpp
     finally:
         proc.kill()
         proc.wait()

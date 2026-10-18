@@ -26,7 +26,8 @@ def load_frames(path: Path, max_side=512):
         return out
     info = media.probe(path)
     fps = min(30, info.fps or 30)
-    return [(to_qimage(b, w, h), int(1000 / fps)) for b, w, h in media.iter_segment(info, 0, info.duration + 1, fps, max_side)]
+    return [(to_qimage(b, w, h, bpp), int(1000 / fps))
+            for b, w, h, bpp in media.iter_segment(info, 0, info.duration + 1, fps, max_side)]
 
 
 def first_frame(path: Path, max_side=128) -> QImage | None:
